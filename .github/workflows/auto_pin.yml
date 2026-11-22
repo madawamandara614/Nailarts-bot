@@ -1,9 +1,9 @@
 name: Auto Nail Art Pinterest Pin (Buffer)
 
 on:
-  schedule:
-    # Runs automatically 2 times per day (09:00 UTC = 2:30 PM SL, 17:00 UTC = 10:30 PM SL)
-    - cron: "0 9,17 * * *"
+  # Triggered externally at your exact chosen times via cron-job.org (POST /dispatches or /workflow_dispatch)
+  repository_dispatch:
+    types: [publish_pin]
   workflow_dispatch:
     inputs:
       action:
