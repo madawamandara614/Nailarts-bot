@@ -1,0 +1,88 @@
+name: Auto Nail Art Pinterest Pin (Buffer)
+
+on:
+  schedule:
+    # Runs automatically 2 times per day (09:00 UTC = 2:30 PM SL, 17:00 UTC = 10:30 PM SL)
+    - cron: "0 9,17 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Choose run mode"
+        required: true
+        default: "publish_pin"
+        type: choice
+        options:
+          - publish_pin
+          - list_channels_only
+
+permissions:
+  contents: write
+
+jobs:
+  generate-and-pin:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: List Buffer Channels & Pinterest Boards (Safe Inspection Mode)
+        if: ${{ github.event.inputs.action == 'list_channels_only' }}
+        env:
+          BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+        run: python nail_art_bot.py --list-channels
+
+      - name: Generate Nail Art Image & SEO Metadata (Cloudflare Workers AI Free)
+        if: ${{ github.event.inputs.action != 'list_channels_only' }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          USE_AI_PROMPT: "true"
+          FLUX_STEPS: "6"
+          PIN_VERTICAL_CROP: "true"
+        run: python nail_art_bot.py --generate-only
+
+      - name: Host Image Permanently on GitHub (Public Repo) OR Upload to ImgBB (Private Repo)
+        if: ${{ github.event.inputs.action != 'list_channels_only' }}
+        id: host_image
+        env:
+          IMGBB_API_KEY: ${{ secrets.IMGBB_API_KEY }}
+        run: |
+          IMAGE_PATH=$(python -c "import json; print(json.load(open('generated_pins/latest_pin.json'))['image_path'])")
+          if [ -n "$IMGBB_API_KEY" ]; then
+            echo "Uploading image to ImgBB (works for Private repos)..."
+            IMG_URL=$(python -c "from pathlib import Path; import os; from nail_art_bot import upload_image_imgbb; print(upload_image_imgbb(Path('$IMAGE_PATH'), os.environ['IMGBB_API_KEY']))")
+          else
+            echo "Committing image to Public GitHub repository for permanent Buffer URL..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "$IMAGE_PATH"
+            git commit -m "Add generated nail art pin: $IMAGE_PATH"
+            git push
+            BRANCH="${GITHUB_REF_NAME:-main}"
+            IMG_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${BRANCH}/${IMAGE_PATH}"
+            echo "Waiting 5 seconds for GitHub raw CDN propagation..."
+            sleep 5
+          fi
+          echo "image_url=$IMG_URL" >> "$GITHUB_OUTPUT"
+          echo "Hosted Image URL: $IMG_URL"
+
+      - name: Publish to Pinterest ONLY via Buffer GraphQL API
+        if: ${{ github.event.inputs.action != 'list_channels_only' }}
+        env:
+          BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+          PINTEREST_BOARD_NAME: ${{ secrets.PINTEREST_BOARD_NAME }}
+          BUFFER_PINTEREST_CHANNEL_ID: ${{ secrets.BUFFER_PINTEREST_CHANNEL_ID }}
+          BUFFER_POST_MODE: "shareNow"
+        run: |
+          python nail_art_bot.py --publish-image-url "${{ steps.host_image.outputs.image_url }}"
