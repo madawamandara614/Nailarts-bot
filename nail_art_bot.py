@@ -7,6 +7,9 @@ Nail Art Pinterest Auto-Publisher Bot (100% Free Stack)
 - Image Hosting: GitHub Raw URL (free, built-in for public repos) OR ImgBB (free API for private repos)
 - Publishing: Buffer GraphQL API (https://api.buffer.com) — STRICTLY filtered to Pinterest ONLY
   (Connected Facebook Pages or other channels are always ignored.)
+
+IMPORTANT: Keep API keys in GitHub Repository Secrets (NEVER hardcode them in this file,
+because GitHub Secret Scanning + Cloudflare automatically revoke tokens pushed to public repos).
 """
 
 from __future__ import annotations
@@ -26,14 +29,6 @@ from urllib.parse import quote
 
 import requests
 from PIL import Image, ImageEnhance
-
-# =============================================================================
-# API CREDENTIALS (Uses GitHub Secrets / env vars first, falls back to below)
-# WARNING: If you upload this file to GitHub with keys inside, set repo to PRIVATE!
-# =============================================================================
-DEFAULT_BUFFER_API_KEY = "W7OMOgz8QA3Vn1K1wD86-_JAr3fOjQGW1lVAGH_Y2bm"
-DEFAULT_CLOUDFLARE_API_TOKEN = "cfut_aqheBDMfa5t3qeYvl7aR3ZtaGOVedKZHN8S0jNuF86ebc495"
-DEFAULT_CLOUDFLARE_ACCOUNT_ID = "0cefb37431a90ee5d90ddf8e4189f94e"
 
 BUFFER_GRAPHQL_URL = "https://api.buffer.com"
 CLOUDFLARE_FLUX_MODEL = "@cf/black-forest-labs/flux-1-schnell"
@@ -320,9 +315,18 @@ def generate_image_cloudflare(
         "steps": max(1, min(8, steps)),
     }
     resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
+    if resp.status_code == 401:
+        raise RuntimeError(
+            "Cloudflare 401 Unauthorized! Your CLOUDFLARE_API_TOKEN was either revoked "
+            "(Cloudflare auto-revokes tokens committed to public GitHub repos) or is missing "
+            "'Workers AI' permission. Create a NEW Workers AI API Token in Cloudflare Dashboard "
+            "and save it ONLY in GitHub Settings -> Secrets -> Actions as CLOUDFLARE_API_TOKEN.\n"
+            f"Server response: {resp.text}"
+        )
+    if not resp.ok:
+        raise RuntimeError(f"Cloudflare API HTTP {resp.status_code}: {resp.text}")
 
+    data = resp.json()
     if not data.get("success", True):
         raise RuntimeError(f"Cloudflare Workers AI error: {data.get('errors')}")
 
@@ -364,7 +368,8 @@ def buffer_graphql(api_key: str, query: str, variables: dict[str, Any] | None = 
         payload["variables"] = variables
 
     resp = requests.post(BUFFER_GRAPHQL_URL, headers=headers, json=payload, timeout=45)
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(f"Buffer API HTTP {resp.status_code}: {resp.text}")
     body = resp.json()
     if body.get("errors"):
         raise RuntimeError(f"Buffer GraphQL errors: {body['errors']}")
@@ -602,14 +607,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    buffer_api_key = (os.getenv("BUFFER_API_KEY") or DEFAULT_BUFFER_API_KEY).strip()
-    cf_account_id = (os.getenv("CLOUDFLARE_ACCOUNT_ID") or DEFAULT_CLOUDFLARE_ACCOUNT_ID).strip()
-    cf_api_token = (os.getenv("CLOUDFLARE_API_TOKEN") or DEFAULT_CLOUDFLARE_API_TOKEN).strip()
+    buffer_api_key = os.getenv("BUFFER_API_KEY", "").strip()
+    cf_account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    cf_api_token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
     imgbb_api_key = os.getenv("IMGBB_API_KEY", "").strip()
 
     if args.list_channels:
         if not buffer_api_key:
-            print("ERROR: BUFFER_API_KEY is required for --list-channels.", file=sys.stderr)
+            print("ERROR: BUFFER_API_KEY secret is missing in GitHub Actions!", file=sys.stderr)
             return 1
         list_channels_command(buffer_api_key)
         return 0
@@ -618,7 +623,7 @@ def main() -> int:
 
     if args.generate_only:
         if not cf_account_id or not cf_api_token:
-            print("ERROR: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required.", file=sys.stderr)
+            print("ERROR: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN secrets are missing!", file=sys.stderr)
             return 1
 
         use_ai_prompt = os.getenv("USE_AI_PROMPT", "true").lower() == "true"
@@ -653,7 +658,7 @@ def main() -> int:
         return 0
 
     if not buffer_api_key:
-        print("ERROR: BUFFER_API_KEY is required.", file=sys.stderr)
+        print("ERROR: BUFFER_API_KEY secret is missing in GitHub Actions!", file=sys.stderr)
         return 1
 
     if args.publish_image_url:
@@ -671,7 +676,7 @@ def main() -> int:
         image_url = args.publish_image_url
     else:
         if not cf_account_id or not cf_api_token:
-            print("ERROR: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required.", file=sys.stderr)
+            print("ERROR: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN secrets are missing!", file=sys.stderr)
             return 1
         if not imgbb_api_key:
             print("ERROR: IMGBB_API_KEY is required for one-shot mode without --publish-image-url.", file=sys.stderr)
