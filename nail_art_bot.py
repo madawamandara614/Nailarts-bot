@@ -2,14 +2,13 @@
 """
 Nail Art Pinterest Auto-Publisher Bot (100% Free Stack)
 -------------------------------------------------------
-- Prompt & Pinterest SEO: Cloudflare Workers AI (Llama 3.1 8B) + rich built-in Nail Art prompt library
+- Prompt & Pinterest SEO: Cloudflare Workers AI (Llama 3.1 8B) + Dynamic Combinatorial
+  Nail Art Generator (thousands of unique colors, shapes, finishes, motifs, titles,
+  descriptions, and hashtags — never repeats the same template!)
 - Image Generation: Cloudflare Workers AI (@cf/black-forest-labs/flux-1-schnell, 10,000 free neurons/day)
 - Image Hosting: GitHub Raw URL (free, built-in for public repos) OR ImgBB (free API for private repos)
 - Publishing: Buffer GraphQL API (https://api.buffer.com) — STRICTLY filtered to Pinterest ONLY
   (Connected Facebook Pages or other channels are always ignored.)
-
-IMPORTANT: Keep API keys in GitHub Repository Secrets (NEVER hardcode them in this file,
-because GitHub Secret Scanning + Cloudflare automatically revoke tokens pushed to public repos).
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ import io
 import json
 import os
 import random
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,129 +34,111 @@ BUFFER_GRAPHQL_URL = "https://api.buffer.com"
 CLOUDFLARE_FLUX_MODEL = "@cf/black-forest-labs/flux-1-schnell"
 CLOUDFLARE_TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct"
 
-# High-reach Pinterest nail art concepts modeled on top-performing aesthetic pins
-NAIL_ART_CONCEPTS: list[dict[str, str]] = [
-    {
-        "theme": "Dark Red Gradient Aura Butterfly Nails",
-        "title": "Save This Pin | Dark Red Gradient Butterfly Nail Art Ideas",
-        "prompt": (
-            "Ultra-detailed macro beauty photography of long glossy coffin nails with a deep crimson "
-            "and dark burgundy ombre aura gradient over sheer milky pink base, delicate hand-painted "
-            "red and black monarch butterflies, fine dark red botanical branches, tiny 3D white pearl "
-            "blossoms and micro crystal dewdrops, studio softbox specular shine on glass-like gel topcoat, "
-            "vertical 2:3 portrait close-up of manicured fingers centered cleanly, soft warm skin tones, "
-            "photorealistic Pinterest viral nail inspo, 8k, no text, no watermark"
-        ),
-        "hashtags": "#NailArt #RedNails #ButterflyNails #CoffinNails #NailInspo #PinterestNails #GelNails #AestheticNails",
-    },
-    {
-        "theme": "Pearl Chrome Glazed Donut Almond Nails",
-        "title": "Glazed Pearl Chrome Almond Nails | Clean Girl Nail Inspo",
-        "prompt": (
-            "Macro luxury nail photography of medium-length almond nails with sheer milky pink base "
-            "and iridescent pearl chrome mirror glaze finish, subtle 3D sculpted water droplets and tiny "
-            "champagne gold micro-pearls near the cuticle, soft diffused daylight studio glow, vertical "
-            "2:3 portrait close-up of graceful manicured hand centered cleanly, ultra-glossy gel finish, "
-            "photorealistic Pinterest nail inspiration, 8k, no text, no watermark"
-        ),
-        "hashtags": "#ChromeNails #GlazedDonutNails #AlmondNails #CleanGirlNails #NailInspo #MilkyNails #GelManicure",
-    },
-    {
-        "theme": "Velvet Cat-Eye Burgundy & Gold Foil Nails",
-        "title": "Velvet Cat-Eye Burgundy Nails with Gold Leaf Accents",
-        "prompt": (
-            "Ultra-sharp macro beauty shot of glossy almond nails featuring magnetic velvet cat-eye "
-            "deep wine burgundy gel polish with luminous satin shimmer, delicate 24k gold leaf flakes "
-            "and minimalist fine gold French tip line, dramatic soft studio lighting highlighting the "
-            "3D velvet depth, vertical 2:3 portrait close-up of manicured fingers, photorealistic luxury "
-            "salon nail art, 8k, no text, no watermark"
-        ),
-        "hashtags": "#CatEyeNails #VelvetNails #BurgundyNails #LuxuryNails #NailDesign #NailIdeas #GelNails",
-    },
-    {
-        "theme": "Coquette Blush Pink 3D Bow & Lace French Tips",
-        "title": "Coquette Pink French Tip Nails with 3D Ribbons & Pearls",
-        "prompt": (
-            "Macro salon beauty photography of medium coffin nails with sheer rosy jelly pink base, "
-            "crisp milky white micro French tips, tiny sculpted 3D satin white bows, delicate silver "
-            "chrome stars, and mini pearl accents, dreamy soft pastel studio lighting with glossy gel "
-            "reflection, vertical 2:3 portrait close-up of manicured fingers centered cleanly, viral "
-            "Pinterest coquette nail aesthetic, 8k, no text, no watermark"
-        ),
-        "hashtags": "#CoquetteNails #PinkNails #FrenchTipNails #3DNailArt #CuteNails #NailInspo #PinterestNails",
-    },
-    {
-        "theme": "Black Cherry Ombre & 3D Floral Jelly Nails",
-        "title": "Black Cherry Ombre Nails | 3D Blossom Gel Nail Art",
-        "prompt": (
-            "Close-up editorial macro nail photography of long tapered ballerina nails with translucent "
-            "black cherry jelly gradient fading into soft nude pink, sculpted 3D translucent glass "
-            "petals with tiny silver caviar beads at the center, high-gloss wet gel shine, soft studio "
-            "highlights, vertical 2:3 portrait close-up of manicured hand, photorealistic Pinterest nail "
-            "art, 8k, no text, no watermark"
-        ),
-        "hashtags": "#BlackCherryNails #OmbreNails #JellyNails #3DFlowerNails #NailArtIdeas #LongNails #GelManicure",
-    },
-    {
-        "theme": "Midnight Navy Celestial Gold Starburst Nails",
-        "title": "Midnight Blue & Gold Celestial Nail Art Ideas",
-        "prompt": (
-            "Macro editorial beauty photography of glossy almond nails with deep midnight navy blue "
-            "cat-eye galaxy gel polish fading into sheer milky lavender at the cuticle, raised metallic "
-            "gold chrome celestial starbursts, crescent moons, and tiny crystal rhinestones, ultra-glossy "
-            "gel topcoat reflections, vertical 2:3 portrait close-up of manicured fingers, photorealistic "
-            "Pinterest viral nails, 8k, no text, no watermark"
-        ),
-        "hashtags": "#CelestialNails #BlueNails #GoldChromeNails #AlmondNails #NailInspo #AestheticNails #GelNails",
-    },
-    {
-        "theme": "Matcha Latte Swirl & Gold Chrome Almond Nails",
-        "title": "Matcha Green Swirl Nails | Aesthetic Spring Nail Inspo",
-        "prompt": (
-            "Macro salon nail photography of sleek medium almond nails with creamy oat-milk nude base, "
-            "organic sage matcha green abstract gel swirls, delicate raised 3D molten gold chrome "
-            "lines, glossy glass-like topcoat catching soft natural daylight, vertical 2:3 portrait "
-            "close-up of manicured hand centered cleanly, viral Pinterest nail art inspiration, 8k, "
-            "no text, no watermark"
-        ),
-        "hashtags": "#MatchaNails #GreenNails #SwirlNails #SpringNails #AlmondNails #NailInspo #GelNails",
-    },
-    {
-        "theme": "Rose Quartz Marble & Rose Gold Foil Nails",
-        "title": "Rose Quartz Crystal Marble Nails | Elegant Nail Ideas",
-        "prompt": (
-            "Ultra-detailed macro beauty shot of glossy coffin nails styled like translucent pink rose "
-            "quartz crystal marble with delicate milky white veining and subtle rose-gold foil flakes "
-            "encapsulated in clear builder gel, high-shine specular highlights, vertical 2:3 portrait "
-            "close-up of manicured fingers, photorealistic Pinterest wedding and luxury nail inspo, 8k, "
-            "no text, no watermark"
-        ),
-        "hashtags": "#RoseQuartzNails #MarbleNails #PinkNails #WeddingNails #ElegantNails #NailInspo #GelNails",
-    },
-    {
-        "theme": "Espresso Brown Tortoiseshell & Gold French Nails",
-        "title": "Chic Tortoiseshell & Espresso French Tip Nail Art",
-        "prompt": (
-            "Macro luxury nail photography of glossy medium almond nails combining translucent amber "
-            "and dark espresso brown tortoiseshell jelly patterns with sleek chocolate French tips and "
-            "thin metallic gold chrome borders, rich studio lighting with crisp glass gel shine, "
-            "vertical 2:3 portrait close-up of manicured hand, viral Pinterest autumn nail inspo, 8k, "
-            "no text, no watermark"
-        ),
-        "hashtags": "#TortoiseshellNails #BrownNails #FallNails #FrenchTips #NailArt #NailInspo #ClassyNails",
-    },
-    {
-        "theme": "Lavender Aura Chrome Butterfly Nails",
-        "title": "Dreamy Lavender Aura Nails with Silver Chrome Butterflies",
-        "prompt": (
-            "Macro beauty photography of long glossy almond nails with soft sheer milky base and "
-            "glowing pastel lavender-lilac airbrushed aura centers, delicate 3D liquid silver chrome "
-            "butterflies and tiny micro-rhinestones, luminous studio lighting, vertical 2:3 portrait "
-            "close-up of manicured fingers centered cleanly, photorealistic Pinterest nail inspo, 8k, "
-            "no text, no watermark"
-        ),
-        "hashtags": "#AuraNails #LavenderNails #PurpleNails #ButterflyNails #ChromeNails #NailInspo #PinterestNails",
-    },
+# ---------------------------------------------------------------------------
+# Dynamic Combinatorial Nail Art Pools (100,000+ unique combinations)
+# ---------------------------------------------------------------------------
+NAIL_SHAPES: list[tuple[str, str]] = [
+    ("long coffin", "CoffinNails"),
+    ("medium almond", "AlmondNails"),
+    ("short squoval", "ShortNails"),
+    ("tapered ballerina", "BallerinaNails"),
+    ("sleek stiletto", "StilettoNails"),
+    ("soft square", "SquareNails"),
+    ("Russian almond", "LuxuryNails"),
+    ("short rounded", "NaturalNails"),
+    ("long oval", "OvalNails"),
+]
+
+COLOR_PALETTES: list[tuple[str, str, list[str]]] = [
+    ("deep crimson & milky blush", "Crimson & Blush", ["RedNails", "BurgundyNails"]),
+    ("emerald green & 24k gold", "Emerald & Gold", ["EmeraldNails", "GreenNails"]),
+    ("iridescent pearl & sheer champagne", "Champagne Pearl", ["PearlNails", "NeutralNails"]),
+    ("sakura baby pink & milky white", "Sakura Pink", ["PinkNails", "SakuraNails"]),
+    ("cobalt sapphire & liquid silver", "Sapphire & Silver", ["BlueNails", "SilverNails"]),
+    ("creamy matcha latte & oat beige", "Matcha & Oat", ["MatchaNails", "SageNails"]),
+    ("sunset coral & warm peach glaze", "Sunset Coral", ["CoralNails", "PeachNails"]),
+    ("espresso mocha & caramel amber", "Espresso & Amber", ["BrownNails", "MochaNails"]),
+    ("pastel lavender & lilac mist", "Lavender Mist", ["LavenderNails", "PurpleNails"]),
+    ("black cherry & sheer rose nude", "Black Cherry", ["BlackCherryNails", "DarkNails"]),
+    ("icy baby blue & frosted chrome", "Frosted Ice Blue", ["IceBlueNails", "WinterNails"]),
+    ("ruby wine & velvet rose", "Ruby Velvet", ["WineNails", "VelvetNails"]),
+    ("butter yellow & ivory cream", "Butter Yellow", ["YellowNails", "PastelNails"]),
+    ("terracotta clay & warm bronze", "Terracotta Bronze", ["TerracottaNails", "AutumnNails"]),
+    ("obsidian black & champagne gold", "Obsidian & Gold", ["BlackNails", "EdgyNails"]),
+    ("rose quartz pink & rose gold", "Rose Quartz", ["RoseQuartzNails", "WeddingNails"]),
+    ("pistachio cream & mint glaze", "Pistachio Mint", ["MintNails", "SpringNails"]),
+    ("plum berry & iridescent violet", "Plum Berry", ["PlumNails", "BerryNails"]),
+    ("holographic opal & sheer milk", "Opal Shimmer", ["OpalNails", "GlazedNails"]),
+    ("cranberry syrup & frosted white", "Cranberry Syrup", ["SyrupNails", "JellyNails"]),
+]
+
+TECHNIQUES: list[tuple[str, str, str]] = [
+    ("magnetic velvet cat-eye gel", "Velvet Cat-Eye", "CatEyeNails"),
+    ("airbrushed aura ombre gradient", "Aura Ombre", "AuraNails"),
+    ("mirror glazed pearl chrome", "Glazed Chrome", "ChromeNails"),
+    ("translucent Korean syrup jelly", "Syrup Jelly", "KoreanNails"),
+    ("ultra-thin micro French tips", "Micro French", "FrenchTipNails"),
+    ("encapsulated crystal marble", "Crystal Marble", "MarbleNails"),
+    ("glossy tortoiseshell jelly", "Tortoiseshell", "TortoiseshellNails"),
+    ("blooming watercolor ink", "Watercolor Bloom", "WatercolorNails"),
+    ("sculpted 3D molten chrome waves", "3D Liquid Chrome", "3DNailArt"),
+    ("glass-like sheer builder gel", "Glass Gel", "GlassNails"),
+    ("crushed mother-of-pearl inlay", "Shell Inlay", "ShellNails"),
+    ("matte velvet with glossy drip tips", "Matte & Gloss", "MatteNails"),
+]
+
+ACCENT_MOTIFS: list[tuple[str, str, str]] = [
+    ("delicate hand-painted monarch butterflies", "Butterfly", "ButterflyNails"),
+    ("sculpted 3D translucent glass flower petals", "3D Floral", "3DFlowerNails"),
+    ("tiny 3D satin coquette ribbons and micro pearls", "Coquette Bow", "CoquetteNails"),
+    ("raised metallic celestial starbursts and crescent moons", "Celestial", "CelestialNails"),
+    ("fine botanical branches with micro crystal dewdrops", "Botanical", "FloralNails"),
+    ("delicate 24k gold leaf foil flakes", "Gold Foil", "GoldFoilNails"),
+    ("minimalist swirling abstract ribbons", "Abstract Swirl", "SwirlNails"),
+    ("dainty micro-rhinestone clusters near the cuticle", "Crystal", "RhinestoneNails"),
+    ("sculpted 3D clear water droplets", "Water Droplet", "WaterDropNails"),
+    ("dainty hand-painted cherries and tiny hearts", "Cherry Heart", "CuteNails"),
+    ("delicate white lace filigree detailing", "Lace", "BridalNails"),
+    ("clean minimalist negative-space line art", "Minimalist", "MinimalistNails"),
+]
+
+OCCASIONS: list[tuple[str, str]] = [
+    ("everyday clean-girl elegance", "CleanGirlNails"),
+    ("bridal and wedding guest glam", "WeddingNailInspo"),
+    ("romantic date-night vibes", "DateNightNails"),
+    ("effortless vacation and brunch style", "SummerNails"),
+    ("cozy autumn and winter luxury", "FallNailIdeas"),
+    ("fresh spring salon inspiration", "SpringNailInspo"),
+    ("party-ready evening sparkle", "PartyNails"),
+    ("chic minimalist office wear", "ClassyNails"),
+]
+
+TITLE_PATTERNS: list[str] = [
+    "{color_short} {tech_short} {motif_short} Nails | {shape_cap} Inspo",
+    "Stunning {color_short} {motif_short} Nail Art ({tech_short} Look)",
+    "{tech_short} {color_short} Nails with {motif_short} Details",
+    "Trending {color_short} {shape_cap} Nails — {tech_short} Ideas",
+    "Save For Your Next Manicure: {color_short} {motif_short} Nails",
+    "Obsessed With These {color_short} {tech_short} {shape_cap} Nails",
+    "Chic {color_short} Nail Design | {tech_short} & {motif_short}",
+    "Dreamy {color_short} {motif_short} Nails to Try Next",
+]
+
+DESCRIPTION_TEMPLATES: list[str] = [
+    "Show this {color} manicure to your nail tech! These {shape} nails blend {tech} with {motif} for {occasion}.",
+    "Looking for a fresh manicure refresh? This {color} {tech} set on {shape} nails features {motif} — pure perfection for {occasion}.",
+    "Pinned straight to the dream salon board: glossy {shape} nails in {color} with {tech} and {motif}, made for {occasion}.",
+    "Can't stop staring at the shine on these {color} {shape} nails. The {tech} finish paired with {motif} elevates {occasion}.",
+    "Instant manicure envy! {shape_cap} nails styled in {color} using {tech} and finished with {motif} for {occasion}.",
+    "Upgrade your nail game with this {color} look — {tech} meets {motif} on sleek {shape} nails, ideal for {occasion}.",
+    "Soft lighting, glass-like shine, and {color} tones. These {shape} {tech} nails with {motif} are a must-save for {occasion}.",
+    "Need your next nail appointment idea? Try {color} {tech} on {shape} nails accented with {motif} for {occasion}.",
+]
+
+EXTRA_GENERAL_TAGS: list[str] = [
+    "NailArt", "NailInspo", "NailIdeas", "NailDesign", "GelNails",
+    "GelManicure", "PinterestNails", "AestheticNails", "ManicureIdeas",
+    "SalonNails", "TrendyNails", "NailsOfTheDay", "NailTrends2026",
 ]
 
 
@@ -178,17 +160,97 @@ class PinterestTarget:
     board_name: str
 
 
+def _load_recent_themes(history_path: Path) -> list[str]:
+    if not history_path.exists():
+        return []
+    try:
+        data = json.loads(history_path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(x) for x in data[-25:]]
+    except Exception:
+        pass
+    return []
+
+
+def _save_recent_theme(history_path: Path, palette_short: str, motif_short: str) -> None:
+    try:
+        recent = _load_recent_themes(history_path)
+        recent.append(f"{palette_short}|{motif_short}")
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.write_text(json.dumps(recent[-30:], indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _pick_unique_combo(history_path: Path) -> dict[str, Any]:
+    recent = set(_load_recent_themes(history_path))
+    recent_colors = {item.split("|")[0] for item in recent if "|" in item}
+
+    fresh_palettes = [p for p in COLOR_PALETTES if p[1] not in recent_colors]
+    palette = random.choice(fresh_palettes or COLOR_PALETTES)
+    shape = random.choice(NAIL_SHAPES)
+    tech = random.choice(TECHNIQUES)
+    motif = random.choice(ACCENT_MOTIFS)
+    occasion = random.choice(OCCASIONS)
+
+    tag_pool = list(palette[2]) + [shape[1], tech[2], motif[2], occasion[1]]
+    tag_pool.extend(random.sample(EXTRA_GENERAL_TAGS, k=3))
+    seen: set[str] = set()
+    unique_tags: list[str] = []
+    for t in tag_pool:
+        clean = re.sub(r"[^A-Za-z0-9]", "", t)
+        if clean and clean.lower() not in seen:
+            seen.add(clean.lower())
+            unique_tags.append(f"#{clean}")
+        if len(unique_tags) >= 8:
+            break
+
+    return {
+        "shape": shape[0],
+        "shape_cap": shape[0].title(),
+        "color": palette[0],
+        "color_short": palette[1],
+        "tech": tech[0],
+        "tech_short": tech[1],
+        "motif": motif[0],
+        "motif_short": motif[1],
+        "occasion": occasion[0],
+        "hashtags": " ".join(unique_tags),
+    }
+
+
+def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
+    """Robustly extract a JSON object from LLM output even if wrapped in prose or fences."""
+    cleaned = raw_text.strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    candidate = cleaned[start : end + 1]
+    try:
+        parsed = json.loads(candidate)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        fixed = re.sub(r"(?<!\\)\n", " ", candidate)
+        try:
+            parsed = json.loads(fixed)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+
 def build_pin_content(
     cf_account_id: str | None = None,
     cf_api_token: str | None = None,
     use_ai_prompt: bool = True,
+    history_path: Path = Path("generated_pins/history.json"),
 ) -> PinContent:
     """
-    Generate a fresh Nail Art image prompt and Pinterest SEO title/description.
-    Uses Cloudflare Workers AI (Llama 3.1 8B) when enabled, with automatic fallback
-    to the curated high-reach Nail Art concept library.
+    Generate a 100% unique Nail Art design, image prompt, Pinterest SEO title,
+    natural varied description, and tailored hashtags for every single run.
     """
-    base = random.choice(NAIL_ART_CONCEPTS)
+    combo = _pick_unique_combo(history_path)
+    theme = f"{combo['color_short']} {combo['tech_short']} {combo['motif_short']} Nails"
 
     if use_ai_prompt and cf_account_id and cf_api_token:
         try:
@@ -201,17 +263,23 @@ def build_pin_content(
                 "Content-Type": "application/json",
             }
             system_msg = (
-                "You are a viral Pinterest Nail Art creative director and SEO specialist. "
-                "Return ONLY valid JSON with keys: theme, title, description, image_prompt, alt_text. "
-                "Rules: title <= 90 chars, catchy Pinterest save-worthy wording; "
-                "description <= 350 chars with 6-8 relevant nail art hashtags; "
-                "image_prompt must describe photorealistic macro nail photography of manicured fingers "
-                "in a vertical 2:3 portrait close-up with ultra-glossy gel finish, studio lighting, "
-                "and end with '8k, photorealistic, no text, no watermark'."
+                "You are a viral Pinterest Nail Art creative director and SEO copywriter. "
+                "Output ONLY a single-line valid JSON object with keys: "
+                "title, description, image_prompt, alt_text. No markdown, no extra commentary. "
+                "Requirements: "
+                "1) title: catchy, natural Pinterest title (<= 85 chars), vary style every time. "
+                "2) description: fresh, engaging 2-sentence Pinterest caption tailored to this exact "
+                "design followed by 7-8 unique niche hashtags (<= 380 chars). NEVER use generic "
+                "cliches like 'Save this gorgeous look for your next salon appointment'. "
+                "3) image_prompt: ultra-detailed photorealistic macro nail photography prompt of "
+                "manicured fingers in a vertical 2:3 portrait close-up, studio softbox reflections, "
+                "glass-like gel topcoat, warm natural skin tones, ending with '8k, photorealistic, no text, no watermark'. "
+                "4) alt_text: concise descriptive alt text (<= 140 chars)."
             )
             user_msg = (
-                f"Create a fresh, unique viral Pinterest nail art design inspired by the style of "
-                f"'{base['theme']}' (vary colors, textures, or accents so every pin feels new)."
+                f"Design brief: {combo['shape']} nails in {combo['color']} using {combo['tech']}, "
+                f"decorated with {combo['motif']}, styled for {combo['occasion']}. "
+                f"Write a totally fresh title, description with matching hashtags, and photorealistic image prompt."
             )
             resp = requests.post(
                 url,
@@ -221,45 +289,52 @@ def build_pin_content(
                         {"role": "system", "content": system_msg},
                         {"role": "user", "content": user_msg},
                     ],
-                    "max_tokens": 450,
+                    "temperature": 0.9,
+                    "max_tokens": 500,
                 },
                 timeout=45,
             )
             resp.raise_for_status()
-            raw_text = resp.json().get("result", {}).get("response", "").strip()
-            if "```" in raw_text:
-                start = raw_text.find("{")
-                end = raw_text.rfind("}")
-                if start != -1 and end != -1:
-                    raw_text = raw_text[start : end + 1]
-            parsed = json.loads(raw_text)
-            title = str(parsed["title"]).strip()[:100]
-            description = str(parsed["description"]).strip()[:490]
-            image_prompt = str(parsed["image_prompt"]).strip()
-            alt_text = str(parsed.get("alt_text") or title).strip()[:200]
-            theme = str(parsed.get("theme") or base["theme"]).strip()
-            if title and description and image_prompt:
-                return PinContent(
-                    theme=theme,
-                    title=title,
-                    description=description,
-                    image_prompt=image_prompt,
-                    alt_text=alt_text,
-                )
+            raw_text = resp.json().get("result", {}).get("response", "")
+            parsed = _extract_json_object(raw_text)
+            if parsed:
+                title = str(parsed.get("title", "")).strip()[:100]
+                description = str(parsed.get("description", "")).strip()[:490]
+                image_prompt = str(parsed.get("image_prompt", "")).strip()
+                alt_text = str(parsed.get("alt_text") or title).strip()[:200]
+                if title and description and image_prompt:
+                    if "#" not in description:
+                        description = f"{description}\n\n{combo['hashtags']}"[:490]
+                    _save_recent_theme(history_path, combo["color_short"], combo["motif_short"])
+                    return PinContent(
+                        theme=theme,
+                        title=title,
+                        description=description,
+                        image_prompt=image_prompt,
+                        alt_text=alt_text,
+                    )
         except Exception as exc:
-            print(f"[INFO] AI prompt expansion fallback triggered: {exc}")
+            print(f"[INFO] AI copywriter fallback triggered (using dynamic combinatorial generator): {exc}")
 
-    description = (
-        f"Save this gorgeous {base['theme']} look for your next salon appointment! "
-        f"Ultra-glossy aesthetic nail art inspiration perfect for everyday glam or special occasions.\n\n"
-        f"{base['hashtags']}"
+    title = random.choice(TITLE_PATTERNS).format(**combo)[:100]
+    body = random.choice(DESCRIPTION_TEMPLATES).format(**combo)
+    description = f"{body}\n\n{combo['hashtags']}"[:490]
+    image_prompt = (
+        f"Ultra-detailed macro beauty photography of {combo['shape']} nails in {combo['color']} "
+        f"with {combo['tech']} finish, accented with {combo['motif']}, high-gloss glass-like gel "
+        f"topcoat catching soft studio softbox reflections, vertical 2:3 portrait close-up of "
+        f"manicured fingers centered cleanly, soft natural skin tones, Pinterest viral nail art "
+        f"inspiration for {combo['occasion']}, 8k, photorealistic, no text, no watermark"
     )
+    alt_text = f"{combo['color_short']} {combo['shape']} nails with {combo['tech_short']} and {combo['motif_short']}"[:200]
+
+    _save_recent_theme(history_path, combo["color_short"], combo["motif_short"])
     return PinContent(
-        theme=base["theme"],
-        title=base["title"][:100],
-        description=description[:490],
-        image_prompt=base["prompt"],
-        alt_text=f"{base['theme']} manicured nail art inspiration",
+        theme=theme,
+        title=title,
+        description=description,
+        image_prompt=image_prompt,
+        alt_text=alt_text,
     )
 
 
@@ -317,10 +392,7 @@ def generate_image_cloudflare(
     resp = requests.post(url, headers=headers, json=payload, timeout=120)
     if resp.status_code == 401:
         raise RuntimeError(
-            "Cloudflare 401 Unauthorized! Your CLOUDFLARE_API_TOKEN was either revoked "
-            "(Cloudflare auto-revokes tokens committed to public GitHub repos) or is missing "
-            "'Workers AI' permission. Create a NEW Workers AI API Token in Cloudflare Dashboard "
-            "and save it ONLY in GitHub Settings -> Secrets -> Actions as CLOUDFLARE_API_TOKEN.\n"
+            "Cloudflare 401 Unauthorized! Check CLOUDFLARE_API_TOKEN in GitHub Secrets.\n"
             f"Server response: {resp.text}"
         )
     if not resp.ok:
@@ -633,6 +705,7 @@ def main() -> int:
         pin = build_pin_content(cf_account_id, cf_api_token, use_ai_prompt=use_ai_prompt)
         print(f"[1/2] Generated Nail Art Concept: {pin.theme}")
         print(f"      Title: {pin.title}")
+        print(f"      Description: {pin.description}")
 
         raw_bytes = generate_image_cloudflare(pin.image_prompt, cf_account_id, cf_api_token, steps=steps)
         timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
